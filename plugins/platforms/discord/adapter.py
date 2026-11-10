@@ -1158,6 +1158,7 @@ from plugins.platforms.discord.adapter_config_readers import (
     _DISCORD_PROMPT_TIMEOUT_DEFAULT, _DISCORD_PROMPT_TIMEOUT_MIN, _read_discord_prompt_timeout, _read_dm_role_auth_guild,
     _resolve_exec_approval_admin_gate)
 from plugins.platforms.discord.adapter_exec_approval_view import build_exec_approval_view
+from plugins.platforms.discord.adapter_component_auth import opener_refusal
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -5607,7 +5608,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             channel = await self._resolve_channel(_prompt_target_id(chat_id, metadata))
             send_kwargs, view = build(channel)
             if view is not None:
-                view.live_auth = self._component_live_auth
+                view.live_auth, view.approval_extra = self._component_live_auth, getattr(self.config, "extra", None)
             msg = await channel.send(**send_kwargs)
             if view is not None:
                 view._message = msg
@@ -6342,10 +6343,10 @@ def _define_discord_view_classes() -> None:
             if resolved_msg is not None and self.resolved:
                 await interaction.response.send_message(resolved_msg, ephemeral=True)
                 return False
-            if not self._check_auth(interaction):
-                await interaction.response.send_message(unauth_msg, ephemeral=True)
-                return False
-            return True
+            denial = unauth_msg if not self._check_auth(interaction) else opener_refusal(self, interaction)
+            if denial is not None:  # not admitted, or someone else's card: it stays open for its opener
+                await interaction.response.send_message(denial, ephemeral=True)
+            return denial is None
 
         def _disable_all(self) -> None:
             for child in self.children:
@@ -6713,8 +6714,7 @@ def _define_discord_view_classes() -> None:
             self.add_item(select)
 
         async def _on_select(self, interaction: discord.Interaction):
-            if not self._check_auth(interaction):
-                await interaction.response.send_message(_unauthorized(), ephemeral=True)
+            if not await self._gate(interaction, resolved_msg=None, unauth_msg=_unauthorized()):
                 return
             if self.resolved:
                 await interaction.response.defer()
